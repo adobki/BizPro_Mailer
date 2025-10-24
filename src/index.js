@@ -1,103 +1,79 @@
-// Utility for sending emails from a Render.com server
+// Utility for sending emails from a Vercel.com server
 
-import { Hono } from "hono@4";
-import { cors } from "hono/cors";
-const nodemailer = require("nodemailer");
+const express = require('express');
+const cors = require('cors');
+const nodemailer = require('nodemailer');
 
 // Server settings
-const app = new Hono();
-const port = process.env.EXPRESS_PORT;
+const port = process.env.EXPRESS_PORT || 5555;
 const user = process.env.MAILER_USER;
 const pass = process.env.MAILER_PASS;
 const auth = process.env.auth;
+const app = new express();
+app.use(express.json());
+app.use(cors({ credentials: true })); // Enable CORS across this server
 
 // Mailer settings
+const connectionTimeout = 5000; const greetingTimeout = connectionTimeout;
+const socketTimeout = connectionTimeout; const dnsTimeout = connectionTimeout;
 const transporter = nodemailer.createTransport({
-  service: "gmail",
   auth: { user, pass },
+  service: 'gmail', connectionTimeout, greetingTimeout, socketTimeout, dnsTimeout,
 });
 
 // Mailer Connection test
 transporter.verify((error) => {
   if (error) {
-    console.error("Mail server init error!");
+    console.error('Mail server init error!');
     console.error(error);
-  } else console.log("Mail server connection established sucessfully!");
+  } else console.log('Mail server connection established sucessfully!');
 });
 
-// // Function to test the server
-// function mailerTest(c) {
-//   const { req, res } = c;
-//   console.log({ req, res });
-//   return {
-//     status: "ok",
-//     keys: Object.keys(c).join(", "),
-//     req,
-//     res,
-//     env: { port, user, pass },
-//   };
-// }
-
-// Function to send emails
-async function sendMail(c) {
+// Route controllers
+app.get('/api/v1/health', (req, res) => res.json({ status: true }));
+app.post('/api/v1/sendmail', async (req, res) => {
   // Test request body parsing to catch/handle errors
   try {
-    const { from, to, subject, html } = await c.req.json();
+    console.log('\n\n Trying. . . \n\n')
+    if (!Object.keys(req.body).length) return res.status(400)
+      .json({ error: 'Invalid or no JSON provided in body' });
   } catch {
-    return { error: "Invalid or no JSON provided in body", code: 400 };
+    console.error('Body parsing error. Invalid data format');
+    return res.status(415).json({
+      error: 'Parsing error. Invalid data format',
+      resolve: 'Request data must be in JSON format',
+    });
   }
 
   // Parse required parameters from request body
-  const { from, to, subject, html } = await c.req.json();
-  // .catch(() => ({ error: "Invalid or no JSON provided in body", code: 400 }));
+  const { from, to, subject, html } = req.body;
 
   // Check authorization and return 403 error if unauthorized
-  let authorization = (await c.req.header("authorization"))?.split(" ") || "";
-  console.log({ authorization });
-  authorization =
-    authorization.length === 2 && authorization[0] === "Bearer"
-      ? authorization[1]
-      : undefined;
-  console.log({ authorization, auth }, typeof authorization, typeof auth);
-  if (authorization !== auth) return { error: "Access denied", code: 403 };
+  let authorization = req.headers?.authorization?.split(' ') || '';
+  authorization = authorization.length === 2 && authorization[0] === 'Bearer' ? authorization[1] : undefined;
+  if (authorization !== auth) return res.status(403).json({ error: 'Access denied' });
 
   // Send the mail to user
-  const email = await transporter
-    .sendMail({ from, to, subject, html })
-    .catch((error) => console.error(error))
-    .then(() => console.log("Email sent to user"));
+  const email = await transporter.sendMail({ from, to, subject, html })
+    .catch((error) => ({ error: 'Email sending failed', payload: error }))
+    .then((payload) => payload);
+  
+  if (email.error || !email.accepted) {
+    console.error('Email sending failed:', email.error, email.payload || email)
+    return res.status(400).json({ error: 'Email sending failed' });
+  }
 
-  return {
-    code: 200,
-    result: {
-      status: "ok",
-      // payload,
-      payload: { from, to, subject, html },
-      // keys: Object.keys(c).join(", "),
-      authorization,
-      email,
-      // json: await c.req.json(),
-      // env: { port, user, pass },
-      // body: await c.req.parseBody(),
-      header: await c.req.header(),
-    },
-  };
-}
-
-app.use("/*", cors());
-app.get("/api/v1/health", (c) => c.json({ status: true }));
-
-// app.get("/sendmail", (c) => { return c.json(mailerTest(c)); });
-// app.get("/sendmail/", (c) => { return c.json(mailerTest(c)); });
-
-app.post("/sendmail", async (c) => {
-  const { result, error, code } = await sendMail(c);
-  return c.json({ result, error }, code);
-});
-app.post("/sendmail/", async (c) => {
-  const { result, error, code } = await sendMail(c);
-  return c.json({ result, error }, code);
+  return res.status(200).json({
+    authorization,
+    payload: { from, to, subject, html },
+    email: `Email sent to ${email.accepted[0]}`,
+    headers: req.headers,
+  });
 });
 
-// port: import.meta.env.PORT ?? port,
-Bun.serve({ port, fetch: app.fetch });
+// Handler for unregistered routes/methods
+app.use('/', (req, res) => res.status(404).json({ error: '404 not found' }));
+
+
+// Start the server
+app.listen(port, () => { console.log(`Server running on http://localhost:${port}\n`); });
