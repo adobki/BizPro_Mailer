@@ -1,10 +1,10 @@
 {
   "name": "bizpro_mailer",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "BizPro email service for Vervel deployment",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node utils/.keep_alive.js & node index.js"
   },
   "repository": {
     "type": "git",
@@ -14,6 +14,8 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^5.1.0",
-    "nodemailer": "^7.0.10"
+    "mongoose": "^8.19.2",
+    "nodemailer": "^7.0.10",
+    "requests": "^0.3.0"
   }
 }

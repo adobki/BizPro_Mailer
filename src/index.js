@@ -5,6 +5,7 @@ const cors = require('cors');
 const nodemailer = require('nodemailer');
 const logsRouter = require('./logs');
 const { simpleLogger } = require('./utils/logger');
+const { dbClient, Email, statuses } = require('./utils/db');
 
 // Server settings
 const port = process.env.EXPRESS_PORT || 5555;
@@ -16,28 +17,49 @@ app.use(express.json());
 app.use(cors({ credentials: true })); // Enable CORS across this server
 
 // Mailer settings
-const connectionTimeout = 5000; const greetingTimeout = connectionTimeout;
-const socketTimeout = connectionTimeout; const dnsTimeout = connectionTimeout;
+// const connectionTimeout = 5000; const greetingTimeout = connectionTimeout;
+// const socketTimeout = connectionTimeout; const dnsTimeout = connectionTimeout;
 const transporter = nodemailer.createTransport({
   auth: { user, pass },
-  service: 'gmail', connectionTimeout, greetingTimeout, socketTimeout, dnsTimeout,
+  service: 'gmail',
+  // service: 'gmail', connectionTimeout, greetingTimeout, socketTimeout, dnsTimeout,
 });
 
-// Mailer Connection test
+let connectionStatus = false;
+/**
+ * Mailer Connection test
+ */
+function ping(){
+  transporter.verify((error) => {
+    if (error) {
+      simpleLogger('error', { ...error, service: 'conntest' }, 'Mail server connection failed!\nReconnecting. . .');
+      connectionStatus = false;
+      ping();
+    } else {
+      if (connectionStatus) return;
+      simpleLogger('info', { service: 'conntest' }, 'Mail server connection established sucessfully!');
+      connectionStatus = true;
+    }
+  }); setTimeout(() => { }, 500);
+}
+
+// Test/initialise mailer connection
 transporter.verify((error) => {
   if (error) {
-    simpleLogger('error', { ...error, service: 'conntest' }, 'Mail server init error!')
-  }  else simpleLogger('info', {service: 'conntest'}, 'Mail server connection established sucessfully!')
+    simpleLogger('error', { ...error, service: 'conntest' }, 'Mail server init error!');
+    ping();
+  }  else simpleLogger('info', {service: 'conntest'}, 'Mail server connection established sucessfully!');
 });
 
 // Health check route controller
-app.get('/api/v1/health', (req, res) => res.json({ status: true }));
+app.get('/api/v1/health', (req, res) => res.json({ status: true, db: dbClient.ping() }));
 
 // Logs previewer routes controllers
 app.use('/api/v1/logs', logsRouter);
 
 // Mailer route controller
 app.post('/api/v1/sendmail', async (req, res) => {
+  ping() // Test mail server connection first
   // Check authorization and return 403 error if unauthorized
   let authorization = req.headers?.authorization?.split(' ') || '';
   authorization = authorization.length === 2 && authorization[0] === 'Bearer' ? authorization[1] : undefined;
@@ -77,14 +99,16 @@ app.post('/api/v1/sendmail', async (req, res) => {
   }
 
   // Send the mail to user
+  ping() // Test mail server connection first
   const email = await transporter.sendMail({ from, to, subject, html })
     .catch((error) => ({ error }))
     .then((payload) => payload);
   
   if (email.error || !email.accepted) {
     simpleLogger('error', { ...email, service: 'sendmail' }, `Email sending failed: ${email.error || email.payload}`);
+    // await Email.insertOne({ from, to, subject, html, mailId }); // Queue failed email for automatic retry
     return res.status(400).json({ error: 'Email sending failed' });
-  } simpleLogger('info', { service: 'sendmail' }, `${mailId} email sent to ${email.accepted[0]}`);
+  } simpleLogger('info', { service: 'sendmail' }, `[${mailId}] email sent to ${email.accepted[0]}`);
 
   return res.status(200).json({
     authorization,
@@ -92,6 +116,34 @@ app.post('/api/v1/sendmail', async (req, res) => {
     email: `${mailId} email sent to ${email.accepted[0]}`,
     headers: req.headers,
   });
+});
+
+/**
+ * Worker/service that automatically sends emails queued in the database by watching
+ * for new inserts using MongoDB change streams.
+ */
+Email.watch().on('change', async (change) => {
+  if (change.operationType === 'insert') {
+    const newEmail = change.fullDocument;
+    const { mailId } = newEmail; const id = newEmail._id?.toString();
+    if (newEmail.status === statuses.at(-2)) {
+      simpleLogger('debug', { service: 'eWorker' },
+        `🔥 New email queued: [${id}:${mailId}]\nIgnored as status=${statuses.at(-2)}`);
+      return;
+    } simpleLogger('debug', { service: 'eWorker' }, `🔥 New email queued: [${id}:${mailId}]`);
+
+    // Send the mail to user
+    const email = await transporter.sendMail(newEmail)
+      .catch((error) => ({ error }))
+      .then((payload) => payload);
+    
+    if (!email.accepted?.length) {
+      simpleLogger('error', { ...email, service: 'eWorker' }, `Queued email sending failed: ${email.error || email.payload}`);
+    } else simpleLogger('info', { service: 'eWorker' }, `[${id}:${mailId}] queued email sent to ${email.accepted[0]}`);
+
+    // Update email's status in the database
+    await Email.findByIdAndUpdate(id, { status: statuses.at(email.accepted?.length ? -2 : -1) });
+  }
 });
 
 // Handler for unregistered routes/methods

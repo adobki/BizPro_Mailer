@@ -10,13 +10,14 @@ const logsRouter = express.Router();
 // Route for previewing log objects as is, in JSON format
 logsRouter.get('/', (req, res) => res.status(200).json(logs));
 
-// Route for previewing logs as formatted/pretty-printed strings
+// Routes for previewing logs as formatted/pretty-printed strings
 logsRouter.get('/print', (req, res) => res.status(200).json(printedLogs.map(log => log.log)));
-
-// Route for previewing logs in an interactive HTML webpage
 logsRouter.get('/print/:level', (req, res) => {
   res.status(200).json(printedLogs.filter(log => log.level === req.params.level).map(log => log.log));
-}); logsRouter.get(['/printhtml', '/printhtml/:level'], (req, res) => {
+});
+
+// Route for previewing logs in an interactive HTML webpage
+logsRouter.get(['/printhtml', '/printhtml/:level'], (req, res) => {
   const { level } = req.params;
   // Get route/next route name from request url by analysing its path
   const path = req.url.split('/').slice(2).length ? '.' : 'printhtml';
