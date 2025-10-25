@@ -38,12 +38,23 @@ app.use('/api/v1/logs', logsRouter);
 
 // Mailer route controller
 app.post('/api/v1/sendmail', async (req, res) => {
+  // Check authorization and return 403 error if unauthorized
+  let authorization = req.headers?.authorization?.split(' ') || '';
+  authorization = authorization.length === 2 && authorization[0] === 'Bearer' ? authorization[1] : undefined;
+  if (authorization !== auth) {
+    simpleLogger('debug', { service: 'sendmail', authorization: req.headers?.authorization, resCode: 403 },
+      `Missing/invalid authorization header: Access denied\n authorization: ${req.headers?.authorization}`);
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
   // Test request body parsing to catch/handle errors
   try {
-    if (!Object.keys(req.body).length) return res.status(400)
-      .json({ error: 'Invalid or no JSON data provided in body' });
+    if (!Object.keys(req.body).length) {
+      simpleLogger('debug', { service: 'sendmail', resCode: 400 }, 'Error: Invalid or no JSON data provided in body');
+      return res.status(400).json({ error: 'Invalid or no JSON data provided in body' });
+    }
   } catch (error) {
-    simpleLogger('error', { ...error, service: 'sendmail' }, 'Body parsing error. Invalid data format');
+    simpleLogger('error', { ...error, service: 'sendmail', resCode: 400 }, 'Body parsing error. Invalid data format');
     return res.status(415).json({
       error: 'Parsing error. Invalid data format',
       resolve: 'Request data must be in JSON format',
@@ -57,12 +68,13 @@ app.post('/api/v1/sendmail', async (req, res) => {
   if (!to || typeof to !== 'string') missing = {error: '`to` is required. Must be an email address string'};
   if (!from || typeof from !== 'string') missing = {error: '`from` is required. Must be an email address string'};
   if (!mailId || typeof mailId !== 'string') missing = { error: '`mailId` is required. Must be string of sent mail\'s ID' };
-  if (missing) return res.status(400).json({ ...missing, resolve: 'mailId, from, to, subject, and html are all required' });
-
-  // Check authorization and return 403 error if unauthorized
-  let authorization = req.headers?.authorization?.split(' ') || '';
-  authorization = authorization.length === 2 && authorization[0] === 'Bearer' ? authorization[1] : undefined;
-  if (authorization !== auth) return res.status(403).json({ error: 'Access denied' });
+  if (missing) {
+    const fields = { from, to, subject, html, mailId };
+    const text = JSON.stringify(fields).replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+    simpleLogger('debug', { service: 'sendmail', fields, resCode: 400 },
+      `Missing/invalid field: ${missing.error}\n fields: ${text}`);
+    return res.status(400).json({ ...missing, resolve: 'mailId, from, to, subject, and html are all required' });
+  }
 
   // Send the mail to user
   const email = await transporter.sendMail({ from, to, subject, html })
