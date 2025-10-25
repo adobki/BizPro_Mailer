@@ -3,6 +3,8 @@
 const express = require('express');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
+const logsRouter = require('./logs');
+const { simpleLogger } = require('./utils/logger');
 
 // Server settings
 const port = process.env.EXPRESS_PORT || 5555;
@@ -24,29 +26,38 @@ const transporter = nodemailer.createTransport({
 // Mailer Connection test
 transporter.verify((error) => {
   if (error) {
-    console.error('Mail server init error!');
-    console.error(error);
-  } else console.log('Mail server connection established sucessfully!');
+    simpleLogger('error', { ...error, service: 'conntest' }, 'Mail server init error!')
+  }  else simpleLogger('info', {service: 'conntest'}, 'Mail server connection established sucessfully!')
 });
 
-// Route controllers
+// Health check route controller
 app.get('/api/v1/health', (req, res) => res.json({ status: true }));
+
+// Logs previewer routes controllers
+app.use('/api/v1/logs', logsRouter);
+
+// Mailer route controller
 app.post('/api/v1/sendmail', async (req, res) => {
   // Test request body parsing to catch/handle errors
   try {
-    console.log('\n\n Trying. . . \n\n')
     if (!Object.keys(req.body).length) return res.status(400)
-      .json({ error: 'Invalid or no JSON provided in body' });
-  } catch {
-    console.error('Body parsing error. Invalid data format');
+      .json({ error: 'Invalid or no JSON data provided in body' });
+  } catch (error) {
+    simpleLogger('error', { ...error, service: 'sendmail' }, 'Body parsing error. Invalid data format');
     return res.status(415).json({
       error: 'Parsing error. Invalid data format',
       resolve: 'Request data must be in JSON format',
     });
   }
 
-  // Parse required parameters from request body
-  const { from, to, subject, html } = req.body;
+  // Parse and validate required fields from request body
+  const { from, to, subject, html, mailId } = req.body; let missing;
+  if (!html || typeof html !== 'string') missing = {error: '`html` is required. Must be string containing HTML code'};
+  if (!subject || typeof subject !== 'string') missing = {error: '`subject` is required. Must be a string'};
+  if (!to || typeof to !== 'string') missing = {error: '`to` is required. Must be an email address string'};
+  if (!from || typeof from !== 'string') missing = {error: '`from` is required. Must be an email address string'};
+  if (!mailId || typeof mailId !== 'string') missing = { error: '`mailId` is required. Must be string of sent mail\'s ID' };
+  if (missing) return res.status(400).json({ ...missing, resolve: 'mailId, from, to, subject, and html are all required' });
 
   // Check authorization and return 403 error if unauthorized
   let authorization = req.headers?.authorization?.split(' ') || '';
@@ -55,18 +66,18 @@ app.post('/api/v1/sendmail', async (req, res) => {
 
   // Send the mail to user
   const email = await transporter.sendMail({ from, to, subject, html })
-    .catch((error) => ({ error: 'Email sending failed', payload: error }))
+    .catch((error) => ({ error }))
     .then((payload) => payload);
   
   if (email.error || !email.accepted) {
-    console.error('Email sending failed:', email.error, email.payload || email)
+    simpleLogger('error', { ...email, service: 'sendmail' }, `Email sending failed: ${email.error || email.payload}`);
     return res.status(400).json({ error: 'Email sending failed' });
-  }
+  } simpleLogger('info', { service: 'sendmail' }, `${mailId} email sent to ${email.accepted[0]}`);
 
   return res.status(200).json({
     authorization,
-    payload: { from, to, subject, html },
-    email: `Email sent to ${email.accepted[0]}`,
+    payload: { from, to, subject, html, mailId },
+    email: `${mailId} email sent to ${email.accepted[0]}`,
     headers: req.headers,
   });
 });
@@ -76,4 +87,6 @@ app.use('/', (req, res) => res.status(404).json({ error: '404 not found' }));
 
 
 // Start the server
-app.listen(port, () => { console.log(`Server running on http://localhost:${port}\n`); });
+app.listen(port, () => {
+  simpleLogger('info', { service: 'mailer' }, `Server running on http://localhost:${port}\n`);
+});
