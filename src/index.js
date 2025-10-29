@@ -19,6 +19,7 @@ app.use(cors({ credentials: true })); // Enable CORS across this server
 // Mailer settings
 // const connectionTimeout = 5000; const greetingTimeout = connectionTimeout;
 // const socketTimeout = connectionTimeout; const dnsTimeout = connectionTimeout;
+const maxRetries = 5;
 const transporter = nodemailer.createTransport({
   auth: { user, pass },
   service: 'gmail',
@@ -107,6 +108,8 @@ app.post('/api/v1/sendmail', async (req, res) => {
   if (email.error || !email.accepted) {
     simpleLogger('error', { ...email, service: 'sendmail' }, `Email sending failed: ${email.error || email.payload}`);
     // await Email.insertOne({ from, to, subject, html, mailId }); // Queue failed email for automatic retry
+    await Email.findOneAndUpdate({ from, to, subject, html, mailId }, // Queue failed email for automatic retry
+      { status: statuses[1], $inc: { attempts: 1 } }, { upsert: true });
     return res.status(400).json({ error: 'Email sending failed' });
   } simpleLogger('info', { service: 'sendmail' }, `[${mailId}] email sent to ${email.accepted[0]}`);
 
@@ -119,6 +122,43 @@ app.post('/api/v1/sendmail', async (req, res) => {
 });
 
 /**
+ * Automatically sends emails queued in the database while the worker/service below was offline.
+ * This is required as the worker only treats changes that are made while it is online.
+ */
+async function retryPending() {
+  const pendingEmails = await Email.find({ status: { $ne: statuses.at(-1) }, attempts: { $lt: maxRetries } });
+  let index = pendingEmails.length;
+  if (!pendingEmails) simpleLogger('debug', { service: 'eWorker' }, 'No pending emails in queue.');
+  else simpleLogger('debug', { service: 'eWorker' },
+    `🔥${pendingEmails.length} unsent emails found in queue. Processing them first. . .`);
+
+  // pendingEmails.forEach(email => {
+  pendingEmails.forEach(async (currentEmail) => {
+    const { mailId, id, status, attempts } = currentEmail;
+    const idx = index; index -= 1; // Create internal copy to maintain value against race conditions
+    simpleLogger('debug', { service: 'eWorker' }, `🔥 Old queued email: ${idx} [${id}:${mailId}]`);
+
+    // Send the mail to user
+    const email = await transporter.sendMail(currentEmail.toObject())
+      .catch((error) => ({ error }))
+      .then((payload) => payload);
+    
+    if (!email.accepted?.length) {
+      simpleLogger('error', { ...email, service: 'eWorker' }, 
+        `Queued email ${idx} sending failed: ${email.error || email.payload}`);
+    } else simpleLogger('info', { service: 'eWorker' }, 
+      `🔥 [${id}:${mailId}] queued email ${idx} sent to ${email.accepted[0]}`);
+
+    // Update email's status in the database
+    currentEmail.status = statuses.at(email.accepted?.length ? -1 : 1);
+    currentEmail.error = email.error || undefined;
+    currentEmail.attempts += 1;
+    if (currentEmail.attempts > maxRetries) currentEmail.status = statuses.at(-2);
+    currentEmail.save();
+  });
+}; retryPending();
+
+/**
  * Worker/service that automatically sends emails queued in the database by watching
  * for new inserts using MongoDB change streams.
  */
@@ -126,9 +166,9 @@ Email.watch().on('change', async (change) => {
   if (change.operationType === 'insert') {
     const newEmail = change.fullDocument;
     const { mailId } = newEmail; const id = newEmail._id?.toString();
-    if (newEmail.status === statuses.at(-2)) {
+    if (newEmail.status === statuses.at(-1)) {
       simpleLogger('debug', { service: 'eWorker' },
-        `🔥 New email queued: [${id}:${mailId}]\nIgnored as status=${statuses.at(-2)}`);
+        `🔥 New email queued: [${id}:${mailId}]\nIgnored as status=${statuses.at(-1)}`);
       return;
     } simpleLogger('debug', { service: 'eWorker' }, `🔥 New email queued: [${id}:${mailId}]`);
 
@@ -139,10 +179,39 @@ Email.watch().on('change', async (change) => {
     
     if (!email.accepted?.length) {
       simpleLogger('error', { ...email, service: 'eWorker' }, `Queued email sending failed: ${email.error || email.payload}`);
-    } else simpleLogger('info', { service: 'eWorker' }, `[${id}:${mailId}] queued email sent to ${email.accepted[0]}`);
+    } else simpleLogger('info', { service: 'eWorker' }, `🔥 [${id}:${mailId}] queued email sent to ${email.accepted[0]}`);
 
     // Update email's status in the database
-    await Email.findByIdAndUpdate(id, { status: statuses.at(email.accepted?.length ? -2 : -1) });
+    newEmail.status = statuses.at(email.accepted?.length ? -1 : 1);
+    newEmail.error = email.error;
+    newEmail.attempts += 1;
+    if (newEmail.attempts >= maxRetries) newEmail.status = statuses.at(-2);
+    await Email.findByIdAndUpdate(id, newEmail);
+  } else if (change.operationType !== 'delete') {
+    const changedEmail = await Email.findById(change.documentKey?._id);
+    const { mailId, attempts, status } = changedEmail; const id = changedEmail._id?.toString();
+    if (statuses.slice(-2).includes(status)) return; // Ignore status === 'failed' || 'sent'
+    if (attempts >= maxRetries) { // Ignore failed email due to maximum retry attempts limit
+      simpleLogger('info', { service: 'eWorker' },
+        `Skipped email: [${id}:${mailId}] due to maxRetries\n status: ${status}, attempts: ${attempts}`);
+      return;
+    } simpleLogger('info', { service: 'eWorker' }, `Retrying unsuccessful email: [${id}:${mailId}]`);
+
+    // Send the mail to user
+    const email = await transporter.sendMail(changedEmail.toObject())
+      .catch((error) => ({ error }))
+      .then((payload) => payload);
+    
+    if (!email.accepted?.length) {
+      simpleLogger('error', { ...email, service: 'eWorker' }, `Queued email sending failed: ${email.error || email.payload}`);
+    } else simpleLogger('info', { service: 'eWorker' }, `🔥 [${id}:${mailId}] queued email sent to ${email.accepted[0]}`);
+
+    // Update email's status in the database
+    changedEmail.status = statuses.at(email.accepted?.length ? -1 : 1);
+    changedEmail.error = email.error;
+    changedEmail.attempts += 1;
+    if (changedEmail.attempts > maxRetries) changedEmail.status = statuses.at(-2);
+    changedEmail.save();
   }
 });
 

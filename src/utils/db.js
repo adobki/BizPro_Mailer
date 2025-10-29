@@ -8,7 +8,7 @@ const uri = process.env.MONGODB_URI;
 const serverSelectionTimeoutMS = 1000 * 15; // 15 seconds timeout for all requests
 
 // Create email schema
-const statuses = ['pending', 'sent', 'failed'];
+const statuses = ['pending', 'retry', 'failed', 'sent'];
 const emailSchema = new mongoose.Schema({
   from: { type: String, required: true },
   to: { type: String, required: true },
@@ -16,6 +16,7 @@ const emailSchema = new mongoose.Schema({
   html: { type: String, required: true },
   mailId: { type: String, required: true },
   status: { type: String, enum: statuses, default: statuses[0] },
+  attempts: { type: Number, default: 0 },
   error: String,
   userId: String,
   others: Object,
@@ -27,8 +28,8 @@ emailSchema.pre('validate', () => {
   if (this.error) this.status = statuses.at(-1);
 
   // Require error an message for failed emails
-  else if (this.status === statuses.at(-1)) {
-    throw new SyntaxError('Error message must be set for failed status (set this.error)');
+  if (!this.error && statuses.slice(1, -1).includes(this.status)) {
+    throw new SyntaxError('Error message must be set for retry/failed status (set this.error)');
   }
 });
 
