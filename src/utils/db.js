@@ -57,7 +57,7 @@ class DBClient {
       this.connected = true;
       if (this.loading) {
         delete this.loading;
-        simpleLogger('info', { service: 'MongoDB'}, 'MongoDB connection established successfully!');
+        simpleLogger('info', { service: 'MongoDB' }, 'MongoDB connection established successfully!');
       }
     });
   }
@@ -89,4 +89,4 @@ class DBClient {
 // Create client to connect to database
 const dbClient = new DBClient();
 
-module.exports = { dbClient, Email, statuses };
+module.exports = { mongoose, dbClient, Email, statuses };
